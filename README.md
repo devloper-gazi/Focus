@@ -24,8 +24,8 @@ A modern, Apple-inspired web application that helps you find and download YouTub
 
 1. **Clone the repository**
    ```bash
-   git clone https://github.com/yourusername/youtube-focus.git
-   cd youtube-focus
+   git clone https://github.com/devloper-gazi/focus.git
+   cd focus
    ```
 
 2. **Install dependencies**
@@ -35,7 +35,7 @@ A modern, Apple-inspired web application that helps you find and download YouTub
 
 3. **Run the application**
    ```bash
-   python youtube_focus_app.py
+   python youtube.py
    ```
 
 4. **Open your browser**
