@@ -7,7 +7,6 @@ function App() {
 
   const search = async () => {
     const params = new URLSearchParams({ q: query, filter });
-    const res = await fetch(`/api/videos?${params}`);
     const data = await res.json();
     setVideos(data);
   };
@@ -34,9 +33,6 @@ function App() {
           <li key={v.id} style={{ marginTop: '1rem' }}>
             <img src={v.thumb} alt="thumbnail" width="120" />
             <div>{v.title}</div>
-            <a href={`/api/download/${v.id}?fmt=mp4`}>MP4</a>
-            {' | '}
-            <a href={`/api/download/${v.id}?fmt=mp3`}>MP3</a>
           </li>
         ))}
       </ul>
