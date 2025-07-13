@@ -46,7 +46,6 @@ A modern, Apple-inspired web application that helps you find and download YouTub
 5. **Run the React app**
    ```bash
    npm start
-   ```
 
 6. **Open your browser**
    Navigate to `http://localhost:3000`
