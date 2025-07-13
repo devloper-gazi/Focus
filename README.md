@@ -47,6 +47,8 @@ A modern, Apple-inspired web application that helps you find and download YouTub
    ```bash
    npm start
    ```
+   The development server will automatically proxy API requests to
+   `http://localhost:5000`.
 
 6. **Open your browser**
    Navigate to `http://localhost:3000`
