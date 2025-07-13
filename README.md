@@ -1,6 +1,6 @@
 # YouTube Focus
 
-A modern, Apple-inspired web application that helps you find and download YouTube content without distractions. Built with Flask and featuring a clean, responsive design.
+A modern, Apple-inspired web application that helps you find and download YouTube content without distractions. The backend is powered by **Flask** and the frontend is now a separate **React** application.
 
 ## 🌟 Features
 
@@ -28,27 +28,44 @@ A modern, Apple-inspired web application that helps you find and download YouTub
    cd focus
    ```
 
-2. **Install dependencies**
+2. **Install backend dependencies**
    ```bash
-   pip install -r requirements.txt
+   pip install -r backend/requirements.txt
    ```
 
-3. **Run the application**
+3. **Start the Flask backend**
    ```bash
-   python youtube.py
+   python backend/app.py
    ```
 
-4. **Open your browser**
-   Navigate to `http://localhost:5000`
+4. **Install frontend dependencies**
+   ```bash
+   cd frontend && npm install
+   ```
+
+5. **Run the React app**
+   ```bash
+   npm start
+   ```
+   The development server will automatically proxy API requests to
+   `http://localhost:5000`.
+
+6. **Open your browser**
+   Navigate to `http://localhost:3000`
 
 ## 📦 Dependencies
 
+Backend dependencies are listed in `backend/requirements.txt`:
 ```txt
 Flask==2.3.3
+flask-cors==4.0.0
 selenium==4.15.2
 webdriver-manager==4.0.1
 yt-dlp==2023.9.24
 ```
+
+The React frontend lives in the `frontend` directory and was bootstrapped with
+Create React App. Run `npm start` inside that folder during development.
 
 ## 🎯 Usage
 
