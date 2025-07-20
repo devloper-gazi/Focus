@@ -1,50 +1,508 @@
 """
-youtube_focus_app.py (v9) - Apple-inspired Design
-• Premium UI with smooth animations
-• Modern card layouts and hover effects
-• Optimized structure and performance
+youtube_focus_app.py (v12) - Linux ChromeDriver Fix
+• Fixed Linux Chrome binary detection
+• Improved ChromeDriver version matching
+• Added better error handling for Linux systems
+• Fixed download URL patterns for newer Chrome versions
 """
 
-import io, os, re, urllib.parse, shutil, subprocess, time
-from typing import List, Dict
+import io, os, re, urllib.parse, shutil, subprocess, time, requests, zipfile, stat, platform
+from typing import List, Dict, Optional
 from flask import Flask, request, render_template_string, send_file, abort
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
 from selenium.webdriver.chrome.service import Service
-from webdriver_manager.chrome import ChromeDriverManager
+from selenium.common.exceptions import WebDriverException
 from yt_dlp import YoutubeDL
 
 # ---------- Chrome Setup ----------
 def find_chrome_binary() -> str:
-    paths = [
-        shutil.which("google-chrome"),
-        "/opt/google/chrome/google-chrome",
-        os.path.expanduser("~/.var/app/com.google.Chrome/current/active/files/bin/google-chrome"),
-    ]
+    """Find Chrome binary with comprehensive search"""
+    system = platform.system().lower()
+
+    if system == "windows":
+        paths = [
+            os.path.join(os.environ.get("PROGRAMFILES", ""), "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(os.environ.get("PROGRAMFILES(X86)", ""), "Google", "Chrome", "Application", "chrome.exe"),
+            os.path.join(os.environ.get("LOCALAPPDATA", ""), "Google", "Chrome", "Application", "chrome.exe"),
+        ]
+    elif system == "darwin":  # macOS
+        paths = [
+            "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+            "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        ]
+    else:  # Linux and others
+        # Check common binary locations first
+        binary_names = ["google-chrome", "google-chrome-stable", "chrome", "chromium", "chromium-browser"]
+        paths = []
+
+        # Add which results
+        for name in binary_names:
+            which_result = shutil.which(name)
+            if which_result:
+                paths.append(which_result)
+
+        # Add common installation paths
+        paths.extend([
+            "/usr/bin/google-chrome",
+            "/usr/bin/google-chrome-stable",
+            "/usr/bin/chrome",
+            "/usr/bin/chromium",
+            "/usr/bin/chromium-browser",
+            "/opt/google/chrome/google-chrome",
+            "/opt/google/chrome/chrome",
+            # Flatpak
+            os.path.expanduser("~/.var/app/com.google.Chrome/current/active/files/bin/google-chrome"),
+            os.path.expanduser("~/.var/app/org.chromium.Chromium/current/active/files/bin/chromium"),
+            # Snap
+            "/snap/bin/chromium",
+            "/var/lib/snapd/snap/bin/chromium",
+            "/snap/bin/chrome",
+            "/snap/bin/google-chrome-stable",
+        ])
+
     for path in paths:
-        if path and os.path.exists(path):
+        if path and os.path.exists(path) and os.access(path, os.X_OK):
+            print(f"Found Chrome binary: {path}")
             return path
-    raise FileNotFoundError("Chrome not found. Please check your installation.")
 
-def create_webdriver() -> webdriver.Chrome:
-    chrome_path = find_chrome_binary()
-    version_output = subprocess.check_output([chrome_path, "--version"]).decode()
-    major_version = re.search(r"(\d+)", version_output).group(1)
+    raise FileNotFoundError(
+        f"Chrome/Chromium not found on {system}. Please install:\n"
+        f"- Windows: Download from https://www.google.com/chrome/\n"
+        f"- Linux: sudo dnf install google-chrome-stable OR sudo apt install google-chrome-stable\n"
+        f"- macOS: Download from https://www.google.com/chrome/"
+    )
 
-    options = webdriver.ChromeOptions()
-    options.binary_location = chrome_path
-    options.add_argument("--headless=new")
-    options.add_argument("--no-sandbox")
-    options.add_argument("--disable-dev-shm-usage")
-    options.add_argument("--disable-gpu")
+def get_chrome_version(chrome_path: str) -> str:
+    """Get Chrome version number with multiple fallback strategies"""
+    try:
+        # Primary method: --version flag
+        version_output = subprocess.check_output(
+            [chrome_path, "--version"],
+            timeout=15,
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+
+        print(f"Chrome version output: {version_output}")
+
+        # Try to extract version number
+        version_patterns = [
+            r"Google Chrome (\d+\.\d+\.\d+\.\d+)",
+            r"Chromium (\d+\.\d+\.\d+\.\d+)",
+            r"Chrome (\d+\.\d+\.\d+\.\d+)",
+            r"(\d+\.\d+\.\d+\.\d+)",
+            r"(\d+\.\d+\.\d+)",
+            r"(\d+)",
+        ]
+
+        for pattern in version_patterns:
+            match = re.search(pattern, version_output)
+            if match:
+                version = match.group(1)
+                # Ensure we have a full version number
+                if len(version.split('.')) == 1:
+                    version = version + ".0.0.0"
+                elif len(version.split('.')) == 2:
+                    version = version + ".0.0"
+                elif len(version.split('.')) == 3:
+                    version = version + ".0"
+
+                print(f"Chrome version detected: {version}")
+                return version
+
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired, FileNotFoundError) as e:
+        print(f"Could not get Chrome version using --version: {e}")
+
+    # Try alternative method for some Linux distributions
+    try:
+        # Try using --product-version
+        version_output = subprocess.check_output(
+            [chrome_path, "--product-version"],
+            timeout=10,
+            stderr=subprocess.DEVNULL
+        ).decode().strip()
+
+        if re.match(r"\d+\.\d+\.\d+\.\d+", version_output):
+            print(f"Chrome version detected (product-version): {version_output}")
+            return version_output
+
+    except:
+        pass
+
+    # Final fallback - return a stable recent version
+    fallback_version = "120.0.6099.109"
+    print(f"Using fallback Chrome version: {fallback_version}")
+    return fallback_version
+
+def get_chromedriver_download_info(chrome_version: str) -> tuple:
+    """Get ChromeDriver download URL and expected filename based on Chrome version"""
+    major_version = chrome_version.split('.')[0]
+    system = platform.system().lower()
+
+    # Determine platform suffix
+    if system == "windows":
+        platform_suffix = "win64"
+        filename = "chromedriver.exe"
+    elif system == "darwin":
+        # Check if it's Apple Silicon or Intel
+        try:
+            arch = platform.machine().lower()
+            if arch in ['arm64', 'aarch64']:
+                platform_suffix = "mac-arm64"
+            else:
+                platform_suffix = "mac-x64"
+        except:
+            platform_suffix = "mac-x64"
+        filename = "chromedriver"
+    else:  # Linux
+        platform_suffix = "linux64"
+        filename = "chromedriver"
 
     try:
-        driver_path = ChromeDriverManager(version=major_version).install()
-    except TypeError:
-        driver_path = ChromeDriverManager().install()
+        major_ver = int(major_version)
+        print(f"Looking for ChromeDriver for Chrome major version: {major_ver}")
 
-    return webdriver.Chrome(service=Service(driver_path), options=options)
+        if major_ver >= 115:
+            # New ChromeDriver API for versions 115+
+            api_url = f"https://googlechromelabs.github.io/chrome-for-testing/LATEST_RELEASE_{major_version}"
+            print(f"Trying API URL: {api_url}")
+
+            response = requests.get(api_url, timeout=10)
+            print(f"API response status: {response.status_code}")
+
+            if response.status_code == 200:
+                exact_version = response.text.strip()
+                print(f"Found exact version: {exact_version}")
+                download_url = f"https://storage.googleapis.com/chrome-for-testing-public/{exact_version}/{platform_suffix}/chromedriver-{platform_suffix}.zip"
+                return download_url, filename, exact_version
+
+        # Fallback to legacy API
+        print("Trying legacy API...")
+        download_url = f"https://chromedriver.storage.googleapis.com/LATEST_RELEASE_{major_version}"
+        response = requests.get(download_url, timeout=10)
+        print(f"Legacy API response status: {response.status_code}")
+
+        if response.status_code == 200:
+            exact_version = response.text.strip()
+            print(f"Legacy API found version: {exact_version}")
+            download_url = f"https://chromedriver.storage.googleapis.com/{exact_version}/chromedriver_{platform_suffix}.zip"
+            return download_url, filename, exact_version
+
+    except Exception as e:
+        print(f"Error getting ChromeDriver info: {e}")
+
+    # Final fallback - use a known stable version
+    fallback_version = "120.0.6099.109"
+    print(f"Using fallback ChromeDriver version: {fallback_version}")
+
+    if system == "windows":
+        download_url = f"https://chromedriver.storage.googleapis.com/{fallback_version}/chromedriver_win32.zip"
+    elif system == "darwin":
+        download_url = f"https://chromedriver.storage.googleapis.com/{fallback_version}/chromedriver_mac64.zip"
+    else:
+        download_url = f"https://chromedriver.storage.googleapis.com/{fallback_version}/chromedriver_linux64.zip"
+
+    return download_url, filename, fallback_version
+
+def download_chromedriver_auto(chrome_version: str) -> str:
+    """Automatically download ChromeDriver with retry mechanism"""
+    download_dir = os.path.expanduser("~/.chromedriver_auto")
+    os.makedirs(download_dir, exist_ok=True)
+
+    system = platform.system().lower()
+    driver_filename = "chromedriver.exe" if system == "windows" else "chromedriver"
+    driver_path = os.path.join(download_dir, driver_filename)
+
+    # Check if already exists and is executable
+    if os.path.exists(driver_path) and os.access(driver_path, os.X_OK):
+        print(f"Using existing ChromeDriver: {driver_path}")
+        return driver_path
+
+    print(f"Downloading ChromeDriver for Chrome version {chrome_version}...")
+
+    # Get download information
+    download_url, expected_filename, version = get_chromedriver_download_info(chrome_version)
+
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            print(f"Download attempt {attempt + 1}/{max_retries}: {download_url}")
+
+            # Download the zip file
+            zip_path = os.path.join(download_dir, "chromedriver.zip")
+
+            with requests.get(download_url, stream=True, timeout=30) as response:
+                response.raise_for_status()
+
+                total_size = int(response.headers.get('content-length', 0))
+                downloaded = 0
+
+                with open(zip_path, 'wb') as f:
+                    for chunk in response.iter_content(chunk_size=8192):
+                        if chunk:
+                            f.write(chunk)
+                            downloaded += len(chunk)
+
+                            if total_size > 0:
+                                percent = (downloaded / total_size) * 100
+                                print(f"\rDownload progress: {percent:.1f}%", end="", flush=True)
+
+                print("\nDownload completed, extracting...")
+
+            # Extract the zip file
+            with zipfile.ZipFile(zip_path, 'r') as zip_ref:
+                zip_ref.extractall(download_dir)
+
+            # Find the chromedriver executable
+            extracted_driver = None
+            for root, dirs, files in os.walk(download_dir):
+                for file in files:
+                    if file == expected_filename or (file.startswith("chromedriver") and not file.endswith((".zip", ".txt"))):
+                        potential_path = os.path.join(root, file)
+                        print(f"Found potential chromedriver: {potential_path}")
+
+                        # Check if it's executable or can be made executable
+                        if system == "windows" or os.access(potential_path, os.X_OK):
+                            extracted_driver = potential_path
+                            break
+                        else:
+                            # Try to make it executable
+                            try:
+                                os.chmod(potential_path, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
+                                if os.access(potential_path, os.X_OK):
+                                    extracted_driver = potential_path
+                                    break
+                            except:
+                                pass
+
+                if extracted_driver:
+                    break
+
+            if not extracted_driver:
+                raise Exception("ChromeDriver executable not found in downloaded archive")
+
+            if extracted_driver != driver_path:
+                # Move to final location
+                if os.path.exists(driver_path):
+                    os.remove(driver_path)
+                shutil.move(extracted_driver, driver_path)
+
+            # Make executable on Unix systems
+            if system != "windows":
+                os.chmod(driver_path, stat.S_IRWXU | stat.S_IRGRP | stat.S_IXGRP | stat.S_IROTH | stat.S_IXOTH)
+
+            # Clean up
+            if os.path.exists(zip_path):
+                os.remove(zip_path)
+
+            # Remove extracted directories
+            for item in os.listdir(download_dir):
+                item_path = os.path.join(download_dir, item)
+                if os.path.isdir(item_path):
+                    shutil.rmtree(item_path, ignore_errors=True)
+
+            # Verify the download was successful
+            if os.path.exists(driver_path) and os.access(driver_path, os.X_OK):
+                print(f"\nChromeDriver successfully downloaded: {driver_path}")
+                return driver_path
+            else:
+                raise Exception("Downloaded ChromeDriver is not executable")
+
+        except Exception as e:
+            print(f"\nDownload attempt {attempt + 1} failed: {e}")
+            if attempt < max_retries - 1:
+                print("Retrying in 3 seconds...")
+                time.sleep(3)
+            continue
+
+    raise FileNotFoundError("Could not download ChromeDriver after multiple attempts")
+
+def create_webdriver() -> webdriver.Chrome:
+    """Create Chrome WebDriver with automatic ChromeDriver management"""
+    try:
+        chrome_path = find_chrome_binary()
+        chrome_version = get_chrome_version(chrome_path)
+        major_version = chrome_version.split('.')[0]
+
+        print(f"Chrome path: {chrome_path}")
+        print(f"Chrome version: {chrome_version}")
+        print(f"Chrome major version: {major_version}")
+
+        # Chrome options
+        options = webdriver.ChromeOptions()
+        options.binary_location = chrome_path
+        options.add_argument("--headless=new")
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--disable-gpu")
+        options.add_argument("--disable-extensions")
+        options.add_argument("--disable-plugins")
+        options.add_argument("--disable-images")
+        options.add_argument("--disable-javascript")
+        options.add_argument("--disable-web-security")
+        options.add_argument("--disable-features=VizDisplayCompositor")
+        options.add_argument("--remote-debugging-port=9222")
+        options.add_argument(f"--user-agent=Mozilla/5.0 (Linux; Chrome/{major_version}) YouTube-Focus-App")
+
+        # Strategy 1: Try WebDriver Manager (if available)
+        try:
+            from webdriver_manager.chrome import ChromeDriverManager
+            print("Attempting to use WebDriver Manager...")
+
+            try:
+                # Try with specific version first
+                driver_path = ChromeDriverManager(version=major_version).install()
+            except:
+                # Fallback to latest version
+                driver_path = ChromeDriverManager().install()
+
+            # Verify the driver path is valid
+            if os.path.exists(driver_path) and os.access(driver_path, os.X_OK):
+                print(f"WebDriver Manager success: {driver_path}")
+                return webdriver.Chrome(service=Service(driver_path), options=options)
+
+        except ImportError:
+            print("WebDriver Manager not available, using automatic download...")
+        except Exception as e:
+            print(f"WebDriver Manager failed: {e}")
+
+        # Strategy 2: Try system ChromeDriver first (for Linux)
+        system = platform.system().lower()
+        if system == "linux":
+            system_paths = [
+                "/usr/bin/chromedriver",
+                "/usr/local/bin/chromedriver",
+                shutil.which("chromedriver"),
+                "/snap/bin/chromedriver",
+            ]
+
+            print("Trying system ChromeDriver locations...")
+            for path in system_paths:
+                if path and os.path.exists(path) and os.access(path, os.X_OK):
+                    try:
+                        print(f"Testing system ChromeDriver: {path}")
+                        # Test if the ChromeDriver works
+                        test_service = Service(path)
+                        test_driver = webdriver.Chrome(service=test_service, options=options)
+                        test_driver.quit()
+                        print(f"System ChromeDriver successful: {path}")
+                        return webdriver.Chrome(service=Service(path), options=options)
+                    except Exception as e:
+                        print(f"System ChromeDriver at {path} failed: {e}")
+                        continue
+
+        # Strategy 3: Automatic ChromeDriver download
+        try:
+            print("Attempting automatic ChromeDriver download...")
+            driver_path = download_chromedriver_auto(chrome_version)
+            return webdriver.Chrome(service=Service(driver_path), options=options)
+        except Exception as e:
+            print(f"Automatic ChromeDriver download failed: {e}")
+
+        # Final error message with helpful instructions
+        if system == "linux":
+            install_cmd = "sudo dnf install chromium-chromedriver OR sudo apt install chromium-chromedriver"
+        elif system == "darwin":
+            install_cmd = "brew install chromedriver"
+        else:
+            install_cmd = "Download from https://chromedriver.chromium.org/"
+
+        raise WebDriverException(
+            f"Could not create ChromeDriver on {system}. Please try:\n"
+            f"1. Install ChromeDriver: {install_cmd}\n"
+            f"2. Install WebDriver Manager: pip install webdriver-manager\n"
+            f"3. Make sure Chrome/Chromium is installed and up to date\n"
+            f"4. Chrome version found: {chrome_version}\n"
+            f"5. Chrome binary: {chrome_path}"
+        )
+
+    except Exception as e:
+        print(f"Critical error in create_webdriver: {e}")
+        raise
+
+# ---------- Utilities ----------
+def duration_to_seconds(duration: str) -> int:
+    """Convert duration string to seconds"""
+    if not duration or not duration.strip():
+        return 0
+
+    try:
+        parts = list(map(int, duration.strip().split(":")))
+        if len(parts) == 1:  # Only seconds
+            return parts[0]
+        elif len(parts) == 2:  # Minutes:Seconds
+            return parts[0] * 60 + parts[1]
+        elif len(parts) == 3:  # Hours:Minutes:Seconds
+            return parts[0] * 3600 + parts[1] * 60 + parts[2]
+        else:
+            return 0
+    except (ValueError, IndexError):
+        return 0
+
+def format_subscriber_count(subs: str) -> str:
+    """Format subscriber count for display"""
+    if not subs:
+        return ""
+
+    # Clean up the subscriber count text
+    cleaned = subs.replace("subscribers", "").replace("subscriber", "").strip()
+
+    # Convert to a more readable format if it's a number
+    try:
+        # Handle formats like "1.2M", "500K", etc.
+        if cleaned.endswith(('K', 'M', 'B')):
+            return cleaned
+
+        # Convert large numbers to readable format
+        num = int(cleaned.replace(',', '').replace('.', ''))
+        if num >= 1000000000:
+            return f"{num/1000000000:.1f}B"
+        elif num >= 1000000:
+            return f"{num/1000000:.1f}M"
+        elif num >= 1000:
+            return f"{num/1000:.1f}K"
+        else:
+            return str(num)
+    except (ValueError, AttributeError):
+        return cleaned
+
+def validate_video_id(video_id: str) -> bool:
+    """Validate YouTube video ID format"""
+    if not video_id or len(video_id) != 11:
+        return False
+
+    # YouTube video IDs are 11 characters long and contain only alphanumeric chars, - and _
+    return re.match(r'^[a-zA-Z0-9_-]{11}$', video_id) is not None
+
+def sanitize_filename(filename: str) -> str:
+    """Sanitize filename for safe file system operations"""
+    if not filename:
+        return "untitled"
+
+    # Remove or replace problematic characters
+    sanitized = re.sub(r'[<>:"/\\|?*]', '', filename)
+    sanitized = re.sub(r'[^\w\s.-]', '', sanitized)
+    sanitized = re.sub(r'\s+', ' ', sanitized).strip()
+
+    # Limit length and ensure it's not empty
+    sanitized = sanitized[:100] if len(sanitized) > 100 else sanitized
+    return sanitized if sanitized else "untitled"
+
+def is_valid_youtube_url(url: str) -> bool:
+    """Check if URL is a valid YouTube URL"""
+    if not url:
+        return False
+
+    youtube_patterns = [
+        r'https?://(?:www\.)?youtube\.com/watch\?v=[\w-]+',
+        r'https?://(?:www\.)?youtube\.com/channel/[\w-]+',
+        r'https?://(?:www\.)?youtube\.com/user/[\w-]+',
+        r'https?://(?:www\.)?youtube\.com/c/[\w-]+',
+        r'https?://youtu\.be/[\w-]+',
+    ]
+
+    return any(re.match(pattern, url) for pattern in youtube_patterns)
 
 # ---------- Utilities ----------
 def duration_to_seconds(duration: str) -> int:
